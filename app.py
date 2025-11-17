@@ -115,7 +115,7 @@ Auth: {email}
                                         st.write("---")
                                         st.write("### 🧪 Test Procesare")
                                         
-                                        sb_dict = process_smartbill_data(data)
+                                        sb_dict = process_smartbill_data(data, debug=True)
                                         
                                         st.write(f"**Produse procesate**: {len(sb_dict)}")
                                         
@@ -220,7 +220,7 @@ Product Code: {product_code}
                 st.json(data)
             
             # Procesează data
-            sb_dict = process_smartbill_data(data)
+            sb_dict = process_smartbill_data(data, debug=True)
             
             if product_code in sb_dict:
                 prod = sb_dict[product_code]
@@ -346,7 +346,7 @@ def test_sku_comparison(email, token, cif, url, consumer_key, consumer_secret):
             woo_data = []
     
     if sb_data and woo_data:
-        sb_dict = process_smartbill_data(sb_data)
+        sb_dict = process_smartbill_data(sb_data, debug=False)
         woo_dict = process_woocommerce_data(woo_data)
         
         st.info(f"**SmartBill**: {len(sb_dict)} produse | **WooCommerce**: {len(woo_dict)} produse (primele 20)")
@@ -410,6 +410,9 @@ def get_smartbill_stocks(email, token, cif, warehouse_name, show_progress=True):
             "warehouseName": warehouse_name
         }
         
+        if show_progress:
+            st.info(f"🔍 SmartBill request pentru gestiunea: '{warehouse_name}'")
+        
         response = requests.get(
             url,
             auth=auth,
@@ -418,8 +421,27 @@ def get_smartbill_stocks(email, token, cif, warehouse_name, show_progress=True):
             timeout=30
         )
         
+        if show_progress:
+            st.write(f"Status code SmartBill: {response.status_code}")
+        
         if response.status_code == 200:
-            return response.json()
+            data = response.json()
+            
+            # Debug: Afișează câte produse au fost primite
+            if show_progress:
+                if isinstance(data, dict) and "list" in data:
+                    total_products = 0
+                    for warehouse_item in data["list"]:
+                        if "products" in warehouse_item:
+                            total_products += len(warehouse_item["products"])
+                    st.success(f"✅ Preluat răspuns cu {total_products} produse din SmartBill")
+                elif isinstance(data, list):
+                    st.success(f"✅ Preluat răspuns cu {len(data)} elemente din SmartBill")
+                else:
+                    st.warning("⚠️ Răspuns SmartBill în format neașteptat")
+            
+            return data
+            
         elif response.status_code == 401:
             if show_progress:
                 st.error("🔒 Autentificare eșuată SmartBill")
@@ -427,13 +449,18 @@ def get_smartbill_stocks(email, token, cif, warehouse_name, show_progress=True):
         else:
             if show_progress:
                 st.error(f"Eroare SmartBill API: {response.status_code}")
-                with st.expander("Detalii eroare"):
+                with st.expander("Detalii eroare SmartBill"):
                     st.code(response.text)
             return None
             
+    except requests.exceptions.Timeout:
+        if show_progress:
+            st.error("⏱️ Timeout SmartBill (30 secunde)")
+        return None
     except Exception as e:
         if show_progress:
             st.error(f"Eroare SmartBill: {str(e)}")
+            st.exception(e)
         return None
 
 def get_woocommerce_products(url, consumer_key, consumer_secret):
@@ -505,7 +532,7 @@ def get_woocommerce_products(url, consumer_key, consumer_secret):
         st.error(f"Eroare WooCommerce: {str(e)}")
         return []
 
-def process_smartbill_data(data):
+def process_smartbill_data(data, debug=False):
     """
     Procesează datele SmartBill conform structurii reale din API.
     Structura: data["list"][0]["products"] = listă de produse
@@ -513,12 +540,21 @@ def process_smartbill_data(data):
     sb_dict = {}
     
     if not data:
+        if debug:
+            st.warning("⚠️ process_smartbill_data: data este None sau gol")
         return sb_dict
     
     products = []
     
+    # Debug: Afișează tipul și structura
+    if debug:
+        st.write(f"**Type data**: {type(data).__name__}")
+        if isinstance(data, dict):
+            st.write(f"**Keys**: {list(data.keys())}")
+        elif isinstance(data, list):
+            st.write(f"**List length**: {len(data)}")
+    
     # Structura reală: data este un dict cu cheia "list"
-    # care conține o listă de obiecte warehouse, fiecare cu o listă "products"
     if isinstance(data, dict):
         # Cazul 1: data este un dict direct cu cheia "list"
         if "list" in data:
@@ -527,9 +563,13 @@ def process_smartbill_data(data):
                 for warehouse_item in warehouse_list:
                     if isinstance(warehouse_item, dict) and "products" in warehouse_item:
                         products.extend(warehouse_item["products"])
+                        if debug:
+                            st.write(f"Găsite {len(warehouse_item['products'])} produse în warehouse_item")
         # Cazul 2: data este un dict direct cu cheia "products"
         elif "products" in data:
             products = data["products"]
+            if debug:
+                st.write(f"Găsite {len(products)} produse în data['products']")
     
     elif isinstance(data, list):
         # Data este o listă direct
@@ -548,6 +588,9 @@ def process_smartbill_data(data):
                 # Sau dacă item-ul însuși este un produs
                 elif "productCode" in item:
                     products.append(item)
+    
+    if debug:
+        st.write(f"**Total produse extrase pentru procesare**: {len(products)}")
     
     # Procesează fiecare produs
     for product in products:
@@ -574,6 +617,13 @@ def process_smartbill_data(data):
                 'stock': quantity,
                 'unit': unit
             }
+    
+    if debug:
+        st.write(f"**Produse procesate cu succes în dict**: {len(sb_dict)}")
+        if len(sb_dict) > 0:
+            st.write("**Primele 3 SKU-uri**:")
+            for sku in list(sb_dict.keys())[:3]:
+                st.code(f"{sku}: {sb_dict[sku]['name'][:40]} - Stoc: {sb_dict[sku]['stock']}")
     
     return sb_dict
 
@@ -768,6 +818,9 @@ def main():
         st.header("🚀 Verificare Completă Stocuri")
         st.info(f"Gestiune: **{WAREHOUSE_NAME}** (tip: {WAREHOUSE_TYPE})")
         
+        # Opțiune debug
+        debug_mode = st.checkbox("🐛 Mod Debug (afișează detalii tehnice)", value=False)
+        
         if st.button("▶️ Pornește Verificarea Completă", type="primary", use_container_width=True):
             if not all([sb_email, sb_token, sb_cif, woo_url, woo_key, woo_secret]):
                 st.error("⚠️ Completează toate credențialele în sidebar!")
@@ -775,124 +828,169 @@ def main():
             
             start_time = time.time()
             
-            col1, col2 = st.columns(2)
+            st.markdown("---")
             
-            with col1:
-                with st.spinner("📥 Preluare SmartBill..."):
-                    sb_data = get_smartbill_stocks(sb_email, sb_token, sb_cif, WAREHOUSE_NAME)
+            # SMARTBILL
+            st.subheader("📥 Preluare date SmartBill")
+            with st.spinner(f"Se preiau produse din gestiunea '{WAREHOUSE_NAME}'..."):
+                sb_data = get_smartbill_stocks(sb_email, sb_token, sb_cif, WAREHOUSE_NAME, show_progress=True)
             
-            with col2:
-                with st.spinner("📥 Preluare WooCommerce..."):
-                    woo_data = get_woocommerce_products(woo_url, woo_key, woo_secret)
+            if sb_data is None:
+                st.error("❌ Eroare la preluarea datelor SmartBill. Verifică credențialele și gestiunea.")
+                return
             
-            if sb_data is not None and woo_data:
-                sb_dict = process_smartbill_data(sb_data)
-                woo_dict = process_woocommerce_data(woo_data)
+            # Procesare SmartBill cu debug
+            if debug_mode:
+                st.write("### 🐛 Debug SmartBill - Procesare Date")
+                with st.expander("Vezi structura JSON primită", expanded=False):
+                    st.json(sb_data)
+            
+            sb_dict = process_smartbill_data(sb_data, debug=debug_mode)
+            
+            if len(sb_dict) == 0:
+                st.error("❌ Nu s-au putut prelua produse din SmartBill. Verifică structura răspunsului.")
+                if not debug_mode:
+                    st.info("💡 Activează 'Mod Debug' pentru mai multe detalii")
+                return
+            
+            st.success(f"✅ SmartBill: {len(sb_dict)} produse procesate")
+            
+            st.markdown("---")
+            
+            # WOOCOMMERCE
+            st.subheader("📥 Preluare date WooCommerce")
+            with st.spinner("Se preiau produse din WooCommerce..."):
+                woo_data = get_woocommerce_products(woo_url, woo_key, woo_secret)
+            
+            if not woo_data:
+                st.error("❌ Eroare la preluarea datelor WooCommerce.")
+                return
+            
+            # Procesare WooCommerce
+            woo_dict = process_woocommerce_data(woo_data)
+            
+            if len(woo_dict) == 0:
+                st.error("❌ Nu s-au găsit produse cu SKU în WooCommerce.")
+                return
+            
+            st.success(f"✅ WooCommerce: {len(woo_dict)} produse procesate")
+            
+            elapsed = time.time() - start_time
+            st.info(f"⏱️ Timp total preluare: {elapsed:.1f} secunde")
+            
+            st.markdown("---")
+            
+            # DEBUG: Afișează overlap SKU-uri
+            if debug_mode:
+                st.write("### 🐛 Debug - Overlap SKU-uri")
+                common = set(sb_dict.keys()) & set(woo_dict.keys())
+                st.write(f"**SKU-uri comune**: {len(common)}")
+                st.write(f"**Doar în SmartBill**: {len(set(sb_dict.keys()) - set(woo_dict.keys()))}")
+                st.write(f"**Doar în WooCommerce**: {len(set(woo_dict.keys()) - set(sb_dict.keys()))}")
                 
-                elapsed = time.time() - start_time
-                st.success(f"✅ Date preluate în {elapsed:.1f}s: **{len(sb_dict)}** produse SmartBill | **{len(woo_dict)}** produse WooCommerce")
+                if len(common) > 0:
+                    with st.expander("Vezi primele 10 SKU-uri comune"):
+                        for sku in list(common)[:10]:
+                            st.write(f"- **{sku}**: SB={sb_dict[sku]['stock']}, WOO={woo_dict[sku]['stock']}")
+            
+            # Generare raport
+            df_report = generate_discrepancy_report(sb_dict, woo_dict)
+            
+            if len(df_report) > 0:
+                st.markdown("---")
+                st.header("📊 Raport Discrepanțe")
                 
-                # Generare raport
-                df_report = generate_discrepancy_report(sb_dict, woo_dict)
+                # Metrici
+                metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+                with metric_col1:
+                    critic_count = len(df_report[df_report['Status'] == 'CRITIC'])
+                    st.metric("🔴 Critice", critic_count)
+                with metric_col2:
+                    atentie_count = len(df_report[df_report['Status'] == 'ATENTIE'])
+                    st.metric("🟡 Atenție", atentie_count)
+                with metric_col3:
+                    sync_count = len(df_report[df_report['Status'] == 'SINCRONIZARE'])
+                    st.metric("🔵 Sincronizare", sync_count)
+                with metric_col4:
+                    st.metric("📝 Total Discrepanțe", len(df_report))
                 
-                if len(df_report) > 0:
-                    st.markdown("---")
-                    st.header("📊 Raport Discrepanțe")
-                    
-                    # Metrici
-                    metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
-                    with metric_col1:
-                        critic_count = len(df_report[df_report['Status'] == 'CRITIC'])
-                        st.metric("🔴 Critice", critic_count)
-                    with metric_col2:
-                        atentie_count = len(df_report[df_report['Status'] == 'ATENTIE'])
-                        st.metric("🟡 Atenție", atentie_count)
-                    with metric_col3:
-                        sync_count = len(df_report[df_report['Status'] == 'SINCRONIZARE'])
-                        st.metric("🔵 Sincronizare", sync_count)
-                    with metric_col4:
-                        st.metric("📝 Total Discrepanțe", len(df_report))
-                    
-                    st.markdown("---")
-                    
-                    # Filtre
-                    filter_col1, filter_col2 = st.columns([1, 2])
-                    with filter_col1:
-                        status_filter = st.multiselect(
-                            "Filtrează după status",
-                            options=df_report['Status'].unique(),
-                            default=df_report['Status'].unique()
-                        )
-                    with filter_col2:
-                        search = st.text_input("🔎 Caută după cod sau denumire")
-                    
-                    # Aplicare filtre
-                    df_filtered = df_report[df_report['Status'].isin(status_filter)]
-                    
-                    if search:
-                        mask = (
-                            df_filtered['Cod'].astype(str).str.contains(search, case=False, na=False) |
-                            df_filtered['Denumire'].astype(str).str.contains(search, case=False, na=False)
-                        )
-                        df_filtered = df_filtered[mask]
-                    
-                    # Tabel
-                    st.dataframe(
-                        df_filtered,
-                        use_container_width=True,
-                        height=450,
-                        hide_index=True
+                st.markdown("---")
+                
+                # Filtre
+                filter_col1, filter_col2 = st.columns([1, 2])
+                with filter_col1:
+                    status_filter = st.multiselect(
+                        "Filtrează după status",
+                        options=df_report['Status'].unique(),
+                        default=df_report['Status'].unique()
                     )
-                    
-                    st.caption(f"Afișate {len(df_filtered)} din {len(df_report)} discrepanțe")
-                    
-                    # Export
-                    export_col1, export_col2, export_col3 = st.columns([2, 1, 1])
-                    
-                    with export_col2:
-                        csv = df_filtered.to_csv(index=False).encode('utf-8-sig')
+                with filter_col2:
+                    search = st.text_input("🔎 Caută după cod sau denumire")
+                
+                # Aplicare filtre
+                df_filtered = df_report[df_report['Status'].isin(status_filter)]
+                
+                if search:
+                    mask = (
+                        df_filtered['Cod'].astype(str).str.contains(search, case=False, na=False) |
+                        df_filtered['Denumire'].astype(str).str.contains(search, case=False, na=False)
+                    )
+                    df_filtered = df_filtered[mask]
+                
+                # Tabel
+                st.dataframe(
+                    df_filtered,
+                    use_container_width=True,
+                    height=450,
+                    hide_index=True
+                )
+                
+                st.caption(f"Afișate {len(df_filtered)} din {len(df_report)} discrepanțe")
+                
+                # Export
+                export_col1, export_col2, export_col3 = st.columns([2, 1, 1])
+                
+                with export_col2:
+                    csv = df_filtered.to_csv(index=False).encode('utf-8-sig')
+                    st.download_button(
+                        "📥 Descarcă CSV",
+                        data=csv,
+                        file_name=f"raport_stocuri_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+                
+                with export_col3:
+                    try:
+                        excel_buffer = create_excel_report(df_filtered)
                         st.download_button(
-                            "📥 Descarcă CSV",
-                            data=csv,
-                            file_name=f"raport_stocuri_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                            mime="text/csv",
+                            "📊 Descarcă Excel",
+                            data=excel_buffer,
+                            file_name=f"raport_stocuri_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             use_container_width=True
                         )
-                    
-                    with export_col3:
-                        try:
-                            excel_buffer = create_excel_report(df_filtered)
-                            st.download_button(
-                                "📊 Descarcă Excel",
-                                data=excel_buffer,
-                                file_name=f"raport_stocuri_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                use_container_width=True
-                            )
-                        except:
-                            st.info("Excel export necesită openpyxl")
-                    
-                else:
-                    st.success("🎉 Excelent! Nu s-au găsit discrepanțe între SmartBill și WooCommerce!")
-                    st.balloons()
-                    
-                    # Afișează statistici generale
-                    st.markdown("---")
-                    st.subheader("📈 Statistici Generale")
-                    
-                    stat_col1, stat_col2, stat_col3 = st.columns(3)
-                    with stat_col1:
-                        total_stock_sb = sum(v['stock'] for v in sb_dict.values())
-                        st.metric("Total Stoc SmartBill", f"{total_stock_sb:.0f} buc")
-                    with stat_col2:
-                        total_stock_woo = sum(v['stock'] for v in woo_dict.values())
-                        st.metric("Total Stoc WooCommerce", f"{total_stock_woo:.0f} buc")
-                    with stat_col3:
-                        match_rate = len(set(sb_dict.keys()) & set(woo_dict.keys())) / max(len(sb_dict), len(woo_dict)) * 100 if max(len(sb_dict), len(woo_dict)) > 0 else 0
-                        st.metric("Rata de potrivire", f"{match_rate:.1f}%")
-            
+                    except:
+                        st.info("Excel export necesită openpyxl")
+                
             else:
-                st.error("❌ Nu s-au putut prelua datele. Verifică credențialele și încearcă din nou.")
+                st.success("🎉 Excelent! Nu s-au găsit discrepanțe între SmartBill și WooCommerce!")
+                st.balloons()
+                
+                # Afișează statistici generale
+                st.markdown("---")
+                st.subheader("📈 Statistici Generale")
+                
+                stat_col1, stat_col2, stat_col3 = st.columns(3)
+                with stat_col1:
+                    total_stock_sb = sum(v['stock'] for v in sb_dict.values())
+                    st.metric("Total Stoc SmartBill", f"{total_stock_sb:.0f} buc")
+                with stat_col2:
+                    total_stock_woo = sum(v['stock'] for v in woo_dict.values())
+                    st.metric("Total Stoc WooCommerce", f"{total_stock_woo:.0f} buc")
+                with stat_col3:
+                    match_rate = len(set(sb_dict.keys()) & set(woo_dict.keys())) / max(len(sb_dict), len(woo_dict)) * 100 if max(len(sb_dict), len(woo_dict)) > 0 else 0
+                    st.metric("Rata de potrivire", f"{match_rate:.1f}%")
 
 if __name__ == "__main__":
     main()
