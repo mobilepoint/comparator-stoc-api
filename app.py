@@ -1,5 +1,5 @@
 """
-Aplicație Streamlit - CORECTAT pentru schema staging
+Aplicație Streamlit - folosind schema public (default)
 """
 
 import streamlit as st
@@ -82,8 +82,7 @@ def update_stocks_only(woo_url, woo_key, woo_secret, supabase_client):
     status_text.text("📥 Citire SKU-uri...")
     
     try:
-        # SCHEMA: staging
-        result = supabase_client.schema('staging').table('woocommerce_stock').select('sku').execute()
+        result = supabase_client.table('woocommerce_stock').select('sku').execute()
         existing_skus = {row['sku'] for row in result.data}
         st.info(f"📦 {len(existing_skus)} SKU-uri")
     except Exception as e:
@@ -91,7 +90,7 @@ def update_stocks_only(woo_url, woo_key, woo_secret, supabase_client):
         return False
     
     progress_bar.progress(0.2)
-    status_text.text("📥 Preluare stocuri WooCommerce...")
+    status_text.text("📥 Preluare stocuri...")
     
     stock_updates = []
     page = 1
@@ -132,22 +131,21 @@ def update_stocks_only(woo_url, woo_key, woo_secret, supabase_client):
     progress_bar.progress(0.8)
     
     if stock_updates:
-        status_text.text(f"💾 Actualizare {len(stock_updates)}...")
+        status_text.text(f"💾 Actualizare...")
         updated = 0
         
         for i in range(0, len(stock_updates), 500):
             batch = stock_updates[i:i+500]
             try:
-                # SCHEMA: staging
-                supabase_client.schema('staging').table('woocommerce_stock').upsert(batch).execute()
+                supabase_client.table('woocommerce_stock').upsert(batch).execute()
                 updated += len(batch)
             except Exception as e:
-                st.error(f"Eroare: {e}")
+                st.error(f"Eroare batch: {e}")
         
         progress_bar.progress(1.0)
         status_text.empty()
         progress_bar.empty()
-        st.success(f"✅ Actualizate {updated} stocuri")
+        st.success(f"✅ {updated} stocuri actualizate")
         return True
     
     return False
@@ -175,7 +173,7 @@ def sync_woocommerce_full(woo_url, woo_key, woo_secret, supabase_client):
             if not products:
                 break
             products_data.extend(products)
-            status_text.text(f"📥 {len(products_data)} produse...")
+            status_text.text(f"📥 {len(products_data)}...")
             page += 1
             time.sleep(0.1)
         except:
@@ -215,7 +213,7 @@ def sync_woocommerce_full(woo_url, woo_key, woo_secret, supabase_client):
                 progress_bar.progress(0.3 + (0.4 * (idx / len(variable))))
     
     progress_bar.progress(0.7)
-    st.success(f"✅ {len(all_items)} produse")
+    st.success(f"✅ {len(all_items)}")
     
     status_text.text("💾 Procesare...")
     stock_data = []
@@ -267,21 +265,21 @@ def sync_woocommerce_full(woo_url, woo_key, woo_secret, supabase_client):
             except:
                 pass
         
-        st.success(f"✅ {inserted} produse noi")
+        if inserted > 0:
+            st.success(f"✅ {inserted} produse noi")
     
     progress_bar.progress(0.9)
     
-    status_text.text(f"💾 {len(stock_data)} stocuri...")
+    status_text.text(f"💾 {len(stock_data)}...")
     upserted = 0
     
     for i in range(0, len(stock_data), 500):
         batch = stock_data[i:i+500]
         try:
-            # SCHEMA: staging
-            supabase_client.schema('staging').table('woocommerce_stock').upsert(batch).execute()
+            supabase_client.table('woocommerce_stock').upsert(batch).execute()
             upserted += len(batch)
         except Exception as e:
-            st.error(f"Eroare: {e}")
+            st.error(f"Batch {i//500+1}: {e}")
     
     progress_bar.progress(1.0)
     status_text.empty()
@@ -291,8 +289,7 @@ def sync_woocommerce_full(woo_url, woo_key, woo_secret, supabase_client):
 
 def get_woocommerce_stock_from_supabase(supabase_client):
     try:
-        # SCHEMA: staging
-        result = supabase_client.schema('staging').table('woocommerce_stock').select('*').execute()
+        result = supabase_client.table('woocommerce_stock').select('*').execute()
         return {row['sku']: {'stock': float(row.get('stock_quantity', 0)), 'status': row.get('stock_status', 'outofstock')} for row in result.data}
     except Exception as e:
         st.error(f"Eroare: {e}")
@@ -326,63 +323,63 @@ def generate_discrepancy_report(sb_dict, woo_dict):
     disc = []
     for code, sb in sb_dict.items():
         if code not in woo_dict and sb['stock'] > 0:
-            disc.append({'SKU': code, 'Denumire': sb['name'], 'Stoc SmartBill': sb['stock'], 'Stoc WooCommerce': 'N/A', 'Diferență': sb['stock'], 'Tip': '❌ Lipsește', 'Status': 'CRITIC', 'P': 1})
+            disc.append({'SKU': code, 'Denumire': sb['name'], 'Stoc SB': sb['stock'], 'Stoc Woo': 'N/A', 'Dif': sb['stock'], 'Tip': '❌ Lipsă Woo', 'Status': 'CRITIC', 'P': 1})
         elif code in woo_dict and sb['stock'] > 0 and woo_dict[code]['stock'] == 0:
-            disc.append({'SKU': code, 'Denumire': sb['name'], 'Stoc SmartBill': sb['stock'], 'Stoc WooCommerce': 0, 'Diferență': sb['stock'], 'Tip': '⚠️ Stoc 0', 'Status': 'ATENTIE', 'P': 2})
+            disc.append({'SKU': code, 'Denumire': sb['name'], 'Stoc SB': sb['stock'], 'Stoc Woo': 0, 'Dif': sb['stock'], 'Tip': '⚠️ 0 Woo', 'Status': 'ATENTIE', 'P': 2})
     for code in set(sb_dict.keys()) & set(woo_dict.keys()):
         diff = sb_dict[code]['stock'] - woo_dict[code]['stock']
         if abs(diff) > 0.01:
-            disc.append({'SKU': code, 'Denumire': sb_dict[code]['name'], 'Stoc SmartBill': sb_dict[code]['stock'], 'Stoc WooCommerce': woo_dict[code]['stock'], 'Diferență': round(diff, 2), 'Tip': '🔄 Diferență', 'Status': 'SINCRONIZARE', 'P': 3})
+            disc.append({'SKU': code, 'Denumire': sb_dict[code]['name'], 'Stoc SB': sb_dict[code]['stock'], 'Stoc Woo': woo_dict[code]['stock'], 'Dif': round(diff, 2), 'Tip': '🔄 Dif', 'Status': 'SYNC', 'P': 3})
     for code, woo in woo_dict.items():
         if code not in sb_dict and woo['stock'] > 0:
-            disc.append({'SKU': code, 'Denumire': 'N/A', 'Stoc SmartBill': 0, 'Stoc WooCommerce': woo['stock'], 'Diferență': -woo['stock'], 'Tip': '🚫 În Woo', 'Status': 'CRITIC', 'P': 1})
+            disc.append({'SKU': code, 'Denumire': 'N/A', 'Stoc SB': 0, 'Stoc Woo': woo['stock'], 'Dif': -woo['stock'], 'Tip': '🚫 Woo', 'Status': 'CRITIC', 'P': 1})
     df = pd.DataFrame(disc)
     if len(df) > 0:
-        df = df.sort_values(['P', 'Stoc SmartBill'], ascending=[True, False]).drop('P', axis=1)
+        df = df.sort_values(['P', 'Stoc SB'], ascending=[True, False]).drop('P', axis=1)
     return df
 
 # ====================== UI ======================
 
-st.title("📦 Verificare Stoc")
+st.title("📦 Stoc: SmartBill vs WooCommerce")
 st.markdown("---")
 
 if supabase:
     try:
-        result = supabase.schema('staging').table('woocommerce_stock').select('last_synced_at').order('last_synced_at', desc=True).limit(1).execute()
+        result = supabase.table('woocommerce_stock').select('last_synced_at').order('last_synced_at', desc=True).limit(1).execute()
         if result.data:
-            st.info(f"📅 Ultima sync: {result.data[0]['last_synced_at']}")
+            st.info(f"📅 {result.data[0]['last_synced_at']}")
     except:
         pass
 
 st.markdown("---")
 
-col1, col2, col3 = st.columns(3)
+c1, c2, c3 = st.columns(3)
 
-with col1:
-    quick = st.button("⚡ Update Rapid", type="primary", use_container_width=True)
-with col2:
-    full = st.button("🔄 Sync Complet", type="secondary", use_container_width=True)
-with col3:
+with c1:
+    quick = st.button("⚡ Update", type="primary", use_container_width=True)
+with c2:
+    full = st.button("🔄 Sync", type="secondary", use_container_width=True)
+with c3:
     report = st.button("📊 Raport", type="secondary", use_container_width=True)
 
 if quick:
     if not supabase or not all([woo_url, woo_key, woo_secret]):
-        st.error("⚠️ Configurează!")
+        st.error("⚠️ Config!")
     else:
         update_stocks_only(woo_url, woo_key, woo_secret, supabase)
 
 if full:
     if not supabase or not all([woo_url, woo_key, woo_secret]):
-        st.error("⚠️ Configurează!")
+        st.error("⚠️ Config!")
     else:
         sync_woocommerce_full(woo_url, woo_key, woo_secret, supabase)
 
 if report:
     if not supabase or not all([sb_email, sb_token, sb_cif]):
-        st.error("⚠️ Configurează!")
+        st.error("⚠️ Config!")
     else:
         st.markdown("---")
-        with st.spinner("📥 Preluare..."):
+        with st.spinner("📥..."):
             woo_dict = get_woocommerce_stock_from_supabase(supabase)
             sb_data = get_smartbill_stocks(sb_email, sb_token, sb_cif, WAREHOUSE_NAME)
         
@@ -396,11 +393,11 @@ if report:
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("🔴", len(df[df['Status'] == 'CRITIC']))
                 m2.metric("🟡", len(df[df['Status'] == 'ATENTIE']))
-                m3.metric("🔵", len(df[df['Status'] == 'SINCRONIZARE']))
+                m3.metric("🔵", len(df[df['Status'] == 'SYNC']))
                 m4.metric("📝", len(df))
                 st.dataframe(df, use_container_width=True, height=450, hide_index=True)
                 csv = df.to_csv(index=False).encode('utf-8-sig')
                 st.download_button("📥 CSV", csv, f"raport_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
             else:
-                st.success("🎉 Fără discrepanțe!")
+                st.success("🎉 OK!")
                 st.balloons()
