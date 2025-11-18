@@ -1,6 +1,6 @@
 """
 Aplicație Streamlit - Verificare Stoc SmartBill vs WooCommerce
-Cu debug pentru SKU-uri duplicate și deduplicare automată
+Cu gestionare interactivă duplicate SKU
 """
 
 import streamlit as st
@@ -70,28 +70,28 @@ with st.sidebar:
         else:
             supabase = None
 
-# ====================== FUNCȚII PRINCIPALE ======================
+# ====================== FUNCȚII ======================
 
 def update_stocks_only(woo_url, woo_key, woo_secret, supabase_client):
-    """Update rapid stocuri - cu deduplicare"""
+    """Update rapid stocuri"""
     st.markdown("---")
     st.subheader("⚡ Update Rapid Stocuri")
     
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    status_text.text("📥 Citire SKU-uri...")
+    status_text.text("📥 Citire SKU-uri din Supabase...")
     
     try:
         result = supabase_client.table('woocommerce_stock').select('sku').execute()
         existing_skus = {row['sku'] for row in result.data}
-        st.info(f"📦 {len(existing_skus)} SKU-uri în DB")
+        st.info(f"📦 {len(existing_skus)} SKU-uri în baza de date")
     except Exception as e:
         st.error(f"Eroare: {e}")
         return False
     
     progress_bar.progress(0.2)
-    status_text.text("📥 Preluare stocuri WooCommerce...")
+    status_text.text("📥 Preluare stocuri din WooCommerce...")
     
     stock_dict = {}
     page = 1
@@ -123,18 +123,17 @@ def update_stocks_only(woo_url, woo_key, woo_secret, supabase_client):
                         'last_synced_at': datetime.now().isoformat()
                     }
             
-            status_text.text(f"📥 {len(stock_dict)} SKU-uri...")
+            status_text.text(f"📥 {len(stock_dict)} stocuri preluate...")
             page += 1
             time.sleep(0.1)
         except:
             break
     
     stock_updates = list(stock_dict.values())
-    
     progress_bar.progress(0.8)
     
     if stock_updates:
-        status_text.text(f"💾 Actualizare {len(stock_updates)}...")
+        status_text.text(f"💾 Actualizare {len(stock_updates)} stocuri...")
         updated = 0
         
         for i in range(0, len(stock_updates), 500):
@@ -142,7 +141,7 @@ def update_stocks_only(woo_url, woo_key, woo_secret, supabase_client):
             try:
                 supabase_client.table('woocommerce_stock').upsert(batch).execute()
                 updated += len(batch)
-            except Exception as e:
+            except:
                 for item in batch:
                     try:
                         supabase_client.table('woocommerce_stock').upsert([item]).execute()
@@ -158,161 +157,188 @@ def update_stocks_only(woo_url, woo_key, woo_secret, supabase_client):
     
     return False
 
-def sync_woocommerce_full(woo_url, woo_key, woo_secret, supabase_client):
-    """Sync complet cu deduplicare"""
+def sync_woocommerce_full_safe(woo_url, woo_key, woo_secret, supabase_client):
+    """
+    Sincronizare cu detectare și gestionare interactivă duplicate
+    """
     st.markdown("---")
-    st.subheader("🔄 Sincronizare Completă")
+    st.subheader("🔄 Sincronizare Completă (Safe Mode)")
+    
+    # Initialize session state pentru tracking
+    if 'sync_sku_map' not in st.session_state:
+        st.session_state.sync_sku_map = {}
+    if 'sync_products_processed' not in st.session_state:
+        st.session_state.sync_products_processed = []
+    if 'sync_page' not in st.session_state:
+        st.session_state.sync_page = 1
+    if 'sync_paused' not in st.session_state:
+        st.session_state.sync_paused = False
+    if 'sync_duplicate_found' not in st.session_state:
+        st.session_state.sync_duplicate_found = None
     
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    status_text.text("📥 Preluare produse...")
-    all_items = []
-    page = 1
+    # Dacă avem un duplicat în așteptare
+    if st.session_state.sync_duplicate_found:
+        dup = st.session_state.sync_duplicate_found
+        
+        st.error(f"🔴 DUPLICAT GĂSIT: SKU `{dup['sku']}`")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.write("**Produs existent:**")
+            st.json({
+                'Product ID': dup['existing']['id'],
+                'Nume': dup['existing']['name'],
+                'Tip': dup['existing']['type'],
+                'Stoc': dup['existing']['stock']
+            })
+        
+        with col2:
+            st.write("**Produs duplicat:**")
+            st.json({
+                'Product ID': dup['new']['id'],
+                'Nume': dup['new']['name'],
+                'Tip': dup['new']['type'],
+                'Stoc': dup['new']['stock']
+            })
+        
+        st.markdown("---")
+        st.write("### Ce vrei să faci?")
+        
+        action_col1, action_col2, action_col3 = st.columns(3)
+        
+        with action_col1:
+            if st.button("✅ Păstrează primul (ignoră duplicatul)", use_container_width=True):
+                st.session_state.sync_duplicate_found = None
+                st.rerun()
+        
+        with action_col2:
+            if st.button("🔄 Înlocuiește cu cel nou", use_container_width=True):
+                # Înlocuiește în map
+                st.session_state.sync_sku_map[dup['sku']] = dup['new']
+                st.session_state.sync_duplicate_found = None
+                st.rerun()
+        
+        with action_col3:
+            if st.button("❌ Stop sincronizare", use_container_width=True, type="primary"):
+                st.session_state.sync_sku_map = {}
+                st.session_state.sync_products_processed = []
+                st.session_state.sync_page = 1
+                st.session_state.sync_duplicate_found = None
+                st.error("Sincronizare oprită manual")
+                return False
+        
+        return None  # Așteaptă decizie user
+    
+    # Continuă sincronizarea
+    status_text.text(f"📥 Preluare produse (pagina {st.session_state.sync_page})...")
+    
     endpoint = f"{woo_url}/wp-json/wc/v3/products"
     
-    products_data = []
-    while True:
-        try:
-            response = requests.get(endpoint, auth=(woo_key, woo_secret), params={"per_page": 100, "page": page, "status": "publish"}, timeout=30)
-            if response.status_code != 200:
-                break
-            products = response.json()
-            if not products:
-                break
-            products_data.extend(products)
-            status_text.text(f"📥 {len(products_data)}...")
-            page += 1
-            time.sleep(0.1)
-        except:
-            break
-    
-    progress_bar.progress(0.3)
-    
-    simple = [p for p in products_data if p.get('type') in ['simple', 'external', 'grouped']]
-    variable = [p for p in products_data if p.get('type') == 'variable']
-    
-    st.info(f"Simple: {len(simple)} | Variabile: {len(variable)}")
-    all_items.extend(simple)
-    
-    if variable:
-        status_text.text("🔄 Variații...")
-        total_var = 0
-        
-        for idx, vp in enumerate(variable, 1):
-            vpage = 1
-            while True:
-                try:
-                    vr = requests.get(f"{woo_url}/wp-json/wc/v3/products/{vp['id']}/variations", auth=(woo_key, woo_secret), params={"per_page": 100, "page": vpage}, timeout=30)
-                    if vr.status_code != 200:
-                        break
-                    vlist = vr.json()
-                    if not vlist:
-                        break
-                    all_items.extend(vlist)
-                    total_var += len(vlist)
-                    vpage += 1
-                    time.sleep(0.05)
-                except:
-                    break
-            
-            if idx % 20 == 0:
-                status_text.text(f"🔄 {idx}/{len(variable)} ({total_var})")
-                progress_bar.progress(0.3 + (0.4 * (idx / len(variable))))
-    
-    progress_bar.progress(0.7)
-    st.success(f"✅ {len(all_items)} produse preluate")
-    
-    status_text.text("💾 Procesare și deduplicare...")
-    
-    # DEDUPLICARE
-    stock_dict = {}
-    new_products_dict = {}
-    
-    for p in all_items:
-        sku = p.get('sku', '').strip()
-        if not sku:
-            continue
-        
-        stock_dict[sku] = {
-            'sku': sku,
-            'stock_quantity': float(p.get('stock_quantity') or 0),
-            'stock_status': p.get('stock_status', 'outofstock'),
-            'product_type': p.get('type', 'unknown'),
-            'woo_product_id': p.get('id', 0),
-            'last_synced_at': datetime.now().isoformat()
-        }
-        
-        new_products_dict[sku] = {
-            'sku': sku,
-            'name': p.get('name', ''),
-            'name_norm': p.get('name', '').lower().strip()
-        }
-    
-    stock_data = list(stock_dict.values())
-    new_products = list(new_products_dict.values())
-    
-    duplicates = len(all_items) - len(stock_data)
-    if duplicates > 0:
-        st.warning(f"⚠️ {duplicates} SKU-uri duplicate eliminate automat")
-    
-    progress_bar.progress(0.8)
-    
     try:
-        result = supabase_client.schema('catalog').table('product_sku').select('sku').execute()
-        existing_skus = {row['sku'] for row in result.data}
-    except:
-        existing_skus = set()
-    
-    truly_new = [p for p in new_products if p['sku'] not in existing_skus]
-    
-    if truly_new:
-        status_text.text(f"📝 {len(truly_new)} produse noi...")
-        inserted = 0
+        response = requests.get(
+            endpoint,
+            auth=(woo_key, woo_secret),
+            params={"per_page": 100, "page": st.session_state.sync_page, "status": "publish"},
+            timeout=30
+        )
         
-        for i in range(0, len(truly_new), 50):
-            batch = truly_new[i:i+50]
-            try:
-                pdata = [{'name': p['name'], 'name_norm': p['name_norm']} for p in batch]
-                res = supabase_client.schema('catalog').table('product').insert(pdata).execute()
-                
-                if res.data:
-                    for idx, row in enumerate(res.data):
+        if response.status_code != 200:
+            st.error(f"Eroare API: {response.status_code}")
+            return False
+        
+        products = response.json()
+        
+        if not products:
+            # Finalizare sincronizare
+            st.success(f"✅ Sincronizare completă! {len(st.session_state.sync_sku_map)} produse unice")
+            
+            # Salvează în Supabase
+            status_text.text("💾 Salvare în Supabase...")
+            
+            stock_data = []
+            for sku, prod_data in st.session_state.sync_sku_map.items():
+                stock_data.append({
+                    'sku': sku,
+                    'stock_quantity': float(prod_data['stock']) if prod_data['stock'] is not None else 0,
+                    'stock_status': prod_data['status'],
+                    'product_type': prod_data['type'],
+                    'woo_product_id': prod_data['id'],
+                    'last_synced_at': datetime.now().isoformat()
+                })
+            
+            saved = 0
+            for i in range(0, len(stock_data), 500):
+                batch = stock_data[i:i+500]
+                try:
+                    supabase_client.table('woocommerce_stock').upsert(batch).execute()
+                    saved += len(batch)
+                except:
+                    for item in batch:
                         try:
-                            supabase_client.schema('catalog').table('product_sku').insert({'product_id': row['id'], 'sku': batch[idx]['sku'], 'is_primary': True}).execute()
-                            inserted += 1
+                            supabase_client.table('woocommerce_stock').upsert([item]).execute()
+                            saved += 1
                         except:
                             pass
-            except:
-                pass
+            
+            st.success(f"✅ {saved} produse salvate în Supabase")
+            
+            # Reset session state
+            st.session_state.sync_sku_map = {}
+            st.session_state.sync_products_processed = []
+            st.session_state.sync_page = 1
+            
+            progress_bar.empty()
+            status_text.empty()
+            return True
         
-        if inserted > 0:
-            st.success(f"✅ {inserted} produse noi adăugate")
-    
-    progress_bar.progress(0.9)
-    
-    status_text.text(f"💾 {len(stock_data)} stocuri...")
-    upserted = 0
-    
-    for i in range(0, len(stock_data), 500):
-        batch = stock_data[i:i+500]
-        try:
-            supabase_client.table('woocommerce_stock').upsert(batch).execute()
-            upserted += len(batch)
-        except Exception as e:
-            st.warning(f"⚠️ Batch {i//500+1} eșuat, reîncerc individual...")
-            for item in batch:
-                try:
-                    supabase_client.table('woocommerce_stock').upsert([item]).execute()
-                    upserted += 1
-                except:
-                    pass
-    
-    progress_bar.progress(1.0)
-    status_text.empty()
-    progress_bar.empty()
-    st.success(f"✅ {upserted} stocuri sincronizate")
-    return True
+        # Procesează produsele din pagina curentă
+        for product in products:
+            sku = product.get('sku', '').strip()
+            
+            if not sku:
+                continue
+            
+            product_data = {
+                'id': product.get('id'),
+                'name': product.get('name', 'N/A'),
+                'type': product.get('type', 'unknown'),
+                'stock': product.get('stock_quantity'),
+                'status': product.get('stock_status', 'outofstock')
+            }
+            
+            # Verifică duplicat
+            if sku in st.session_state.sync_sku_map:
+                # DUPLICAT GĂSIT!
+                st.session_state.sync_duplicate_found = {
+                    'sku': sku,
+                    'existing': st.session_state.sync_sku_map[sku],
+                    'new': product_data
+                }
+                st.rerun()
+                return None
+            
+            # Adaugă produs nou
+            st.session_state.sync_sku_map[sku] = product_data
+            st.session_state.sync_products_processed.append(product)
+        
+        # Mergi la următoarea pagină
+        st.session_state.sync_page += 1
+        
+        progress = min(0.1 + (st.session_state.sync_page / 100), 0.9)
+        progress_bar.progress(progress)
+        status_text.text(f"📥 {len(st.session_state.sync_sku_map)} produse procesate...")
+        
+        # Trigger rerun pentru următoarea pagină
+        time.sleep(0.1)
+        st.rerun()
+        
+    except Exception as e:
+        st.error(f"Eroare: {e}")
+        return False
 
 def get_woocommerce_stock_from_supabase(supabase_client):
     """Citește stocuri din Supabase"""
@@ -332,7 +358,7 @@ def get_smartbill_stocks(email, token, cif, warehouse_name):
         return None
 
 def process_smartbill_data(data):
-    """Procesează date SmartBill"""
+    """Procesează SmartBill"""
     sb_dict = {}
     if not data:
         return sb_dict
@@ -350,7 +376,7 @@ def process_smartbill_data(data):
     return sb_dict
 
 def generate_discrepancy_report(sb_dict, woo_dict):
-    """Generează raport discrepanțe"""
+    """Generează raport"""
     disc = []
     for code, sb in sb_dict.items():
         if code not in woo_dict and sb['stock'] > 0:
@@ -369,174 +395,7 @@ def generate_discrepancy_report(sb_dict, woo_dict):
         df = df.sort_values(['P', 'Stoc SB'], ascending=[True, False]).drop('P', axis=1)
     return df
 
-# ====================== FUNCȚIE DEBUG ======================
-
-def debug_find_duplicates(woo_url, woo_key, woo_secret):
-    """Debug: Găsește SKU-uri duplicate în WooCommerce"""
-    
-    st.markdown("---")
-    st.subheader("🐛 Debug: Căutare SKU-uri Duplicate")
-    
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    status_text.text("📥 Preluare TOATE produsele...")
-    all_items = []
-    page = 1
-    endpoint = f"{woo_url}/wp-json/wc/v3/products"
-    
-    products_data = []
-    while True:
-        try:
-            response = requests.get(endpoint, auth=(woo_key, woo_secret), params={"per_page": 100, "page": page, "status": "publish"}, timeout=30)
-            if response.status_code != 200:
-                break
-            products = response.json()
-            if not products:
-                break
-            products_data.extend(products)
-            status_text.text(f"📥 Produse: {len(products_data)}...")
-            page += 1
-            time.sleep(0.1)
-        except:
-            break
-    
-    progress_bar.progress(0.4)
-    
-    simple = [p for p in products_data if p.get('type') in ['simple', 'external', 'grouped']]
-    variable = [p for p in products_data if p.get('type') == 'variable']
-    
-    st.info(f"📦 Simple: {len(simple)} | Variabile: {len(variable)}")
-    all_items.extend(simple)
-    
-    if variable:
-        status_text.text("🔄 Preluare variații...")
-        total_var = 0
-        
-        for idx, vp in enumerate(variable, 1):
-            vpage = 1
-            while True:
-                try:
-                    vr = requests.get(f"{woo_url}/wp-json/wc/v3/products/{vp['id']}/variations", auth=(woo_key, woo_secret), params={"per_page": 100, "page": vpage}, timeout=30)
-                    if vr.status_code != 200:
-                        break
-                    vlist = vr.json()
-                    if not vlist:
-                        break
-                    all_items.extend(vlist)
-                    total_var += len(vlist)
-                    vpage += 1
-                    time.sleep(0.05)
-                except:
-                    break
-            
-            if idx % 20 == 0:
-                status_text.text(f"🔄 Variații: {idx}/{len(variable)} ({total_var})")
-                progress_bar.progress(0.4 + (0.5 * (idx / len(variable))))
-    
-    progress_bar.progress(0.9)
-    st.success(f"✅ Total preluat: {len(all_items)} produse")
-    
-    status_text.text("🔍 Analiză duplicate...")
-    
-    sku_map = {}
-    skus_empty = 0
-    
-    for item in all_items:
-        sku = item.get('sku', '').strip()
-        
-        if not sku:
-            skus_empty += 1
-            continue
-        
-        if sku not in sku_map:
-            sku_map[sku] = []
-        
-        sku_map[sku].append({
-            'id': item.get('id'),
-            'name': item.get('name', 'N/A'),
-            'type': item.get('type', 'unknown'),
-            'stock': item.get('stock_quantity'),
-        })
-    
-    duplicates = {sku: prods for sku, prods in sku_map.items() if len(prods) > 1}
-    
-    progress_bar.progress(1.0)
-    status_text.empty()
-    progress_bar.empty()
-    
-    st.markdown("---")
-    st.header("📊 Rezultate Analiză")
-    
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total produse", len(all_items))
-    c2.metric("SKU-uri unice", len(sku_map))
-    c3.metric("🔴 Duplicate", len(duplicates))
-    c4.metric("Fără SKU", skus_empty)
-    
-    if duplicates:
-        st.markdown("---")
-        st.subheader(f"🔴 {len(duplicates)} SKU-uri Duplicate Găsite")
-        
-        dup_rows = []
-        for sku, prods in duplicates.items():
-            for idx, p in enumerate(prods, 1):
-                dup_rows.append({
-                    'SKU': sku,
-                    'Ocurență': f"{idx}/{len(prods)}",
-                    'Product ID': p['id'],
-                    'Denumire': p['name'][:60] + ('...' if len(p['name']) > 60 else ''),
-                    'Tip': p['type'],
-                    'Stoc': p['stock'] if p['stock'] is not None else 'N/A'
-                })
-        
-        df = pd.DataFrame(dup_rows).sort_values('SKU')
-        st.dataframe(df, use_container_width=True, height=400, hide_index=True)
-        
-        st.markdown("---")
-        st.subheader("📈 Statistici")
-        
-        dup_counts = {}
-        for sku, prods in duplicates.items():
-            count = len(prods)
-            if count not in dup_counts:
-                dup_counts[count] = 0
-            dup_counts[count] += 1
-        
-        for count in sorted(dup_counts.keys()):
-            st.write(f"- **{dup_counts[count]} SKU-uri** apar de **{count} ori**")
-        
-        st.markdown("---")
-        csv = df.to_csv(index=False).encode('utf-8-sig')
-        st.download_button(
-            "📥 Descarcă Lista Duplicate (CSV)",
-            data=csv,
-            file_name=f"duplicate_skus_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
-        
-        with st.expander("💡 Cum rezolv duplicate?"):
-            st.markdown("""
-            **În WooCommerce:**
-            - Products → All Products → Sortează după SKU
-            - Caută SKU-urile din listă
-            - Șterge sau modifică duplicate
-            
-            **În această aplicație:**
-            - Deduplicarea automată păstrează ultimul produs cu fiecare SKU
-            - La sincronizare, duplicate-le sunt eliminate automat
-            """)
-    
-    else:
-        st.success("🎉 Nu există SKU-uri duplicate!")
-        st.balloons()
-    
-    if skus_empty > 0:
-        st.markdown("---")
-        st.warning(f"⚠️ {skus_empty} produse fără SKU")
-
-# ====================== UI PRINCIPAL ======================
+# ====================== UI ======================
 
 st.title("📦 Stoc: SmartBill vs WooCommerce")
 st.markdown("---")
@@ -551,81 +410,52 @@ if supabase:
 
 st.markdown("---")
 
-# Butoane principale
 c1, c2, c3 = st.columns(3)
 
 with c1:
-    quick = st.button("⚡ Update Rapid", type="primary", use_container_width=True, help="~2 minute")
+    quick = st.button("⚡ Update Rapid", type="primary", use_container_width=True, help="~2 min")
 with c2:
-    full = st.button("🔄 Sync Complet", type="secondary", use_container_width=True, help="~30 minute")
+    full = st.button("🔄 Sync Complet (Safe)", type="secondary", use_container_width=True, help="Cu verificare duplicate")
 with c3:
     report = st.button("📊 Raport", type="secondary", use_container_width=True)
 
-# Logica butoane principale
 if quick:
     if not supabase or not all([woo_url, woo_key, woo_secret]):
-        st.error("⚠️ Configurează credențialele!")
+        st.error("⚠️ Configurează!")
     else:
         update_stocks_only(woo_url, woo_key, woo_secret, supabase)
 
 if full:
     if not supabase or not all([woo_url, woo_key, woo_secret]):
-        st.error("⚠️ Configurează credențialele!")
+        st.error("⚠️ Configurează!")
     else:
-        sync_woocommerce_full(woo_url, woo_key, woo_secret, supabase)
+        sync_woocommerce_full_safe(woo_url, woo_key, woo_secret, supabase)
 
 if report:
     if not supabase or not all([sb_email, sb_token, sb_cif]):
-        st.error("⚠️ Configurează credențialele!")
+        st.error("⚠️ Configurează!")
     else:
         st.markdown("---")
-        with st.spinner("📥 Preluare date..."):
+        with st.spinner("📥 Preluare..."):
             woo_dict = get_woocommerce_stock_from_supabase(supabase)
             sb_data = get_smartbill_stocks(sb_email, sb_token, sb_cif, WAREHOUSE_NAME)
         
         if woo_dict and sb_data:
             sb_dict = process_smartbill_data(sb_data)
-            st.success(f"✅ WooCommerce: {len(woo_dict)} | SmartBill: {len(sb_dict)}")
+            st.success(f"✅ Woo: {len(woo_dict)} | SB: {len(sb_dict)}")
             df = generate_discrepancy_report(sb_dict, woo_dict)
             
             if len(df) > 0:
-                st.header("📊 Raport Discrepanțe")
+                st.header("📊 Discrepanțe")
                 m1, m2, m3, m4 = st.columns(4)
-                m1.metric("🔴 Critice", len(df[df['Status'] == 'CRITIC']))
-                m2.metric("🟡 Atenție", len(df[df['Status'] == 'ATENTIE']))
-                m3.metric("🔵 Sincronizare", len(df[df['Status'] == 'SYNC']))
-                m4.metric("📝 Total", len(df))
+                m1.metric("🔴", len(df[df['Status'] == 'CRITIC']))
+                m2.metric("🟡", len(df[df['Status'] == 'ATENTIE']))
+                m3.metric("🔵", len(df[df['Status'] == 'SYNC']))
+                m4.metric("📝", len(df))
                 
-                st.markdown("---")
-                
-                f1, f2 = st.columns([1, 2])
-                with f1:
-                    status_filter = st.multiselect("Status", df['Status'].unique(), df['Status'].unique())
-                with f2:
-                    search = st.text_input("🔎 Caută")
-                
-                df_filt = df[df['Status'].isin(status_filter)]
-                if search:
-                    df_filt = df_filt[
-                        df_filt['SKU'].astype(str).str.contains(search, case=False, na=False) |
-                        df_filt['Denumire'].astype(str).str.contains(search, case=False, na=False)
-                    ]
-                
-                st.dataframe(df_filt, use_container_width=True, height=450, hide_index=True)
-                st.caption(f"Afișate {len(df_filt)} din {len(df)}")
-                
-                csv = df_filt.to_csv(index=False).encode('utf-8-sig')
-                st.download_button("📥 Descarcă CSV", csv, f"raport_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", use_container_width=True)
+                st.dataframe(df, use_container_width=True, height=450, hide_index=True)
+                csv = df.to_csv(index=False).encode('utf-8-sig')
+                st.download_button("📥 CSV", csv, f"raport_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
             else:
-                st.success("🎉 Nu există discrepanțe!")
+                st.success("🎉 OK!")
                 st.balloons()
-
-# Buton debug
-st.markdown("---")
-st.subheader("🛠️ Tools")
-
-if st.button("🐛 Debug: Caută SKU-uri Duplicate", use_container_width=True, help="Identifică SKU-uri duplicate în WooCommerce"):
-    if not all([woo_url, woo_key, woo_secret]):
-        st.error("⚠️ Configurează WooCommerce!")
-    else:
-        debug_find_duplicates(woo_url, woo_key, woo_secret)
