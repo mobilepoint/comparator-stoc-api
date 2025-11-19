@@ -1,6 +1,7 @@
+# ===== IMPORTS ŞI CONFIGURARE =====
 """
 Aplicație Streamlit - Verificare Stoc SmartBill vs WooCommerce
-VERSIUNE FINALĂ - cu fix pentru tipuri de date și comparație corectă
+Versiune finală cu resilience, logging și gestionare duplicate
 """
 
 import streamlit as st
@@ -20,7 +21,8 @@ st.set_page_config(
 
 WAREHOUSE_NAME = "Eroilor 19 cv"
 
-# ====================== SIDEBAR ======================
+
+# ===== SIDEBAR - CONFIGURĂRI =====
 
 with st.sidebar:
     st.header("⚙️ Configurări")
@@ -70,10 +72,11 @@ with st.sidebar:
         else:
             supabase = None
 
-# ====================== FUNCȚII ======================
+
+# ===== FUNCȚIE UPDATE RAPID =====
 
 def update_stocks_only(woo_url, woo_key, woo_secret, supabase_client):
-    """Update rapid stocuri"""
+    """Update rapid stocuri pentru produse existente"""
     st.markdown("---")
     st.subheader("⚡ Update Rapid Stocuri")
     
@@ -81,8 +84,7 @@ def update_stocks_only(woo_url, woo_key, woo_secret, supabase_client):
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # Citește SKU-uri din DB
-        status_text.text("📥 Citire SKU-uri...")
+        status_text.text("📥 Citire SKU-uri din Supabase...")
         
         existing_skus = set()
         offset = 0
@@ -99,7 +101,7 @@ def update_stocks_only(woo_url, woo_key, woo_secret, supabase_client):
                     existing_skus.add(row['sku'])
                 
                 offset += batch_size
-                status_text.text(f"📥 {len(existing_skus)} SKU-uri...")
+                status_text.text(f"📥 {len(existing_skus)} SKU-uri citite...")
                 
                 if len(result.data) < batch_size:
                     break
@@ -110,8 +112,7 @@ def update_stocks_only(woo_url, woo_key, woo_secret, supabase_client):
         st.info(f"📦 {len(existing_skus)} SKU-uri în DB")
         progress_bar.progress(0.2)
         
-        # Preluare stocuri WooCommerce
-        status_text.text("📥 Preluare WooCommerce...")
+        status_text.text("📥 Preluare stocuri din WooCommerce...")
         
         stock_dict = {}
         page = 1
@@ -142,7 +143,7 @@ def update_stocks_only(woo_url, woo_key, woo_secret, supabase_client):
                             'last_synced_at': datetime.now(timezone.utc).isoformat()
                         }
                 
-                status_text.text(f"📥 {len(stock_dict)} (p{page})...")
+                status_text.text(f"📥 {len(stock_dict)} stocuri (p{page})...")
                 page += 1
                 time.sleep(0.1)
             except Exception as e:
@@ -184,91 +185,174 @@ def update_stocks_only(woo_url, woo_key, woo_secret, supabase_client):
         st.code(traceback.format_exc())
         return False
 
+
+# ===== FUNCȚIE SYNC COMPLET =====
+
 def sync_woocommerce_full(woo_url, woo_key, woo_secret, supabase_client):
-    """Sync complet - SIMPLIFICAT"""
+    """Sincronizare completă cu resilience și logging"""
+    
     st.markdown("---")
-    st.subheader("🔄 Sincronizare Completă")
+    
+    progress_container = st.container()
+    result_container = st.container()
+    log_container = st.container()
+    
+    start_time = datetime.now()
+    checkpoint_data = {
+        'start': start_time.strftime('%H:%M:%S'),
+        'steps_completed': []
+    }
     
     try:
-        progress_bar = st.progress(0)
-        status_text = st.empty()
+        with progress_container:
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            info_box = st.empty()
+            
+        with log_container:
+            log_text = st.empty()
+            log_text.text(f"🕐 Start: {checkpoint_data['start']}")
         
-        # Preluare produse
-        status_text.text("📥 Produse...")
+        # STEP 1: Preluare produse
+        with progress_container:
+            status_text.text("📥 Preluare produse principale...")
+        
+        with log_container:
+            log_text.text(f"🕐 Start: {checkpoint_data['start']}\n📥 STEP 1: Preluare produse...")
+        
         all_items = []
         page = 1
-        
         products_data = []
+        products_failed = 0
+        
         while True:
             try:
                 response = requests.get(
                     f"{woo_url}/wp-json/wc/v3/products",
                     auth=(woo_key, woo_secret),
                     params={"per_page": 100, "page": page, "status": "publish"},
-                    timeout=30
+                    timeout=60
                 )
                 
                 if response.status_code != 200:
-                    break
+                    with log_container:
+                        log_text.text(f"{log_text._value}\n⚠️ Pagina {page}: Status {response.status_code}")
+                    products_failed += 1
+                    if products_failed > 3:
+                        break
+                    continue
                 
                 products = response.json()
                 if not products:
                     break
                 
                 products_data.extend(products)
-                status_text.text(f"📥 {len(products_data)} (p{page})...")
+                
+                with progress_container:
+                    status_text.text(f"📥 {len(products_data)} produse (p{page})...")
+                
                 page += 1
                 time.sleep(0.1)
-            except:
-                break
+                
+            except Exception as e:
+                with log_container:
+                    log_text.text(f"{log_text._value}\n❌ Eroare p{page}: {str(e)[:50]}")
+                products_failed += 1
+                if products_failed > 3:
+                    break
         
-        progress_bar.progress(0.3)
+        checkpoint_data['steps_completed'].append('products')
+        
+        with progress_container:
+            progress_bar.progress(0.2)
+        
+        with log_container:
+            log_text.text(f"{log_text._value}\n✅ STEP 1: {len(products_data)} produse")
         
         simple = [p for p in products_data if p.get('type') in ['simple', 'external', 'grouped']]
         variable = [p for p in products_data if p.get('type') == 'variable']
         
-        st.info(f"Simple: {len(simple)} | Variabile: {len(variable)}")
+        with progress_container:
+            info_box.info(f"📦 Simple: {len(simple)} | Variabile: {len(variable)}")
+        
         all_items.extend(simple)
         
-        # Variații
+        with log_container:
+            log_text.text(f"{log_text._value}\n📊 Simple: {len(simple)} | Variabile: {len(variable)}")
+        
+        # STEP 2: Variații
         if variable:
-            status_text.text("🔄 Variații...")
+            with progress_container:
+                status_text.text("🔄 Preluare variații...")
+            
+            with log_container:
+                log_text.text(f"{log_text._value}\n🔄 STEP 2: Preluare variații...")
+            
             total_var = 0
+            failed_products = []
+            checkpoint_every = 50
             
             for idx, vp in enumerate(variable, 1):
+                product_id = vp['id']
                 vpage = 1
+                
                 while True:
                     try:
                         vr = requests.get(
-                            f"{woo_url}/wp-json/wc/v3/products/{vp['id']}/variations",
+                            f"{woo_url}/wp-json/wc/v3/products/{product_id}/variations",
                             auth=(woo_key, woo_secret),
                             params={"per_page": 100, "page": vpage},
-                            timeout=30
+                            timeout=60
                         )
+                        
                         if vr.status_code != 200:
+                            failed_products.append(f"{product_id} ({vr.status_code})")
                             break
+                        
                         vlist = vr.json()
                         if not vlist:
                             break
+                        
                         all_items.extend(vlist)
                         total_var += len(vlist)
                         vpage += 1
                         time.sleep(0.05)
-                    except:
+                        
+                    except Exception as e:
+                        failed_products.append(f"{product_id} ({str(e)[:30]})")
+                        with log_container:
+                            log_text.text(f"{log_text._value}\n⚠️ Produs {product_id}: {str(e)[:50]}")
                         break
                 
-                if idx % 20 == 0:
-                    status_text.text(f"🔄 {idx}/{len(variable)} ({total_var})")
-                    progress_bar.progress(0.3 + (0.4 * (idx / len(variable))))
+                with progress_container:
+                    status_text.text(f"🔄 {idx}/{len(variable)} ({total_var} variații)")
+                    progress_bar.progress(0.2 + (0.5 * (idx / len(variable))))
+                
+                if idx % checkpoint_every == 0:
+                    elapsed = (datetime.now() - start_time).seconds
+                    with log_container:
+                        log_text.text(f"{log_text._value}\n📍 Checkpoint {idx}/{len(variable)}: {total_var} variații ({elapsed}s)")
+            
+            checkpoint_data['steps_completed'].append('variations')
+            
+            with log_container:
+                log_text.text(f"{log_text._value}\n✅ STEP 2: {total_var} variații")
+                if failed_products:
+                    log_text.text(f"{log_text._value}\n⚠️ {len(failed_products)} produse eșuate")
         
-        progress_bar.progress(0.7)
-        st.success(f"✅ {len(all_items)} produse")
+        with progress_container:
+            progress_bar.progress(0.7)
+            info_box.success(f"✅ {len(all_items)} produse total")
         
-        # Procesare
-        status_text.text("💾 Procesare...")
+        # STEP 3: Procesare
+        with log_container:
+            log_text.text(f"{log_text._value}\n💾 STEP 3: Procesare...")
+        
+        with progress_container:
+            status_text.text("💾 Procesare...")
         
         sku_map = {}
-        duplicates = 0
+        duplicate_details = []
         
         for item in all_items:
             sku = item.get('sku', '').strip()
@@ -276,7 +360,17 @@ def sync_woocommerce_full(woo_url, woo_key, woo_secret, supabase_client):
                 continue
             
             if sku in sku_map:
-                duplicates += 1
+                duplicate_details.append({
+                    'sku': sku,
+                    'first': sku_map[sku],
+                    'duplicate': {
+                        'id': item.get('id'),
+                        'name': item.get('name', ''),
+                        'type': item.get('type', 'unknown'),
+                        'stock': item.get('stock_quantity'),
+                        'status': item.get('stock_status', 'outofstock')
+                    }
+                })
             
             sku_map[sku] = {
                 'id': item.get('id'),
@@ -286,12 +380,18 @@ def sync_woocommerce_full(woo_url, woo_key, woo_secret, supabase_client):
                 'status': item.get('stock_status', 'outofstock')
             }
         
-        if duplicates > 0:
-            st.warning(f"⚠️ {duplicates} duplicate")
+        checkpoint_data['steps_completed'].append('processing')
         
-        progress_bar.progress(0.8)
+        with log_container:
+            log_text.text(f"{log_text._value}\n✅ STEP 3: {len(sku_map)} SKU-uri, {len(duplicate_details)} duplicate")
         
-        # Salvare
+        with progress_container:
+            progress_bar.progress(0.8)
+        
+        # STEP 4: Salvare
+        with log_container:
+            log_text.text(f"{log_text._value}\n💾 STEP 4: Salvare...")
+        
         stock_data = []
         for sku, prod in sku_map.items():
             stock_data.append({
@@ -303,38 +403,118 @@ def sync_woocommerce_full(woo_url, woo_key, woo_secret, supabase_client):
                 'last_synced_at': datetime.now(timezone.utc).isoformat()
             })
         
-        status_text.text(f"💾 Salvare...")
+        with progress_container:
+            status_text.text(f"💾 Salvare {len(stock_data)}...")
+        
         saved = 0
+        failed_saves = 0
         
         for i in range(0, len(stock_data), 500):
             batch = stock_data[i:i+500]
             try:
                 supabase_client.table('woocommerce_stock').upsert(batch).execute()
                 saved += len(batch)
-                status_text.text(f"💾 {saved}/{len(stock_data)}...")
-            except:
+                
+                with progress_container:
+                    status_text.text(f"💾 {saved}/{len(stock_data)}...")
+                    progress_bar.progress(0.8 + (0.2 * (saved / len(stock_data))))
+                
+            except Exception as e:
+                with log_container:
+                    log_text.text(f"{log_text._value}\n⚠️ Batch {i//500+1}: {str(e)[:50]}")
+                
                 for item in batch:
                     try:
                         supabase_client.table('woocommerce_stock').upsert([item]).execute()
                         saved += 1
                     except:
-                        pass
+                        failed_saves += 1
         
-        progress_bar.progress(1.0)
-        time.sleep(0.3)
-        progress_bar.empty()
-        status_text.empty()
+        checkpoint_data['steps_completed'].append('save')
         
-        st.success(f"✅ {saved} stocuri salvate")
+        end_time = datetime.now()
+        duration = (end_time - start_time).seconds
+        
+        with log_container:
+            log_text.text(f"{log_text._value}\n✅ STEP 4: {saved} salvate ({failed_saves} eșuate)")
+            log_text.text(f"{log_text._value}\n🏁 Finalizat în {duration}s ({duration//60}m {duration%60}s)")
+        
+        with progress_container:
+            progress_bar.progress(1.0)
+            time.sleep(0.3)
+        
+        progress_container.empty()
+        
+        # REZULTAT FINAL
+        with result_container:
+            st.subheader("✅ Sincronizare Completă!")
+            st.success(f"🎉 {saved} stocuri în {duration//60}m {duration%60}s")
+            
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("📦 Produse", len(all_items))
+            col2.metric("💾 Salvate", saved)
+            col3.metric("🔄 SKU-uri", len(sku_map))
+            col4.metric("⏱️ Timp", f"{duration//60}m {duration%60}s")
+            
+            if failed_saves > 0:
+                st.warning(f"⚠️ {failed_saves} eșuate")
+            
+            # Duplicate
+            if duplicate_details:
+                st.markdown("---")
+                st.warning(f"⚠️ {len(duplicate_details)} SKU-uri duplicate")
+                
+                with st.expander(f"📋 Vezi duplicate", expanded=False):
+                    dup_rows = []
+                    for dup in duplicate_details:
+                        dup_rows.append({
+                            'SKU': dup['sku'],
+                            'Status': '❌ Ignorat',
+                            'ID': dup['first']['id'],
+                            'Denumire': dup['first']['name'][:50],
+                            'Stoc': dup['first']['stock'] if dup['first']['stock'] else 0
+                        })
+                        dup_rows.append({
+                            'SKU': dup['sku'],
+                            'Status': '✅ Păstrat',
+                            'ID': dup['duplicate']['id'],
+                            'Denumire': dup['duplicate']['name'][:50],
+                            'Stoc': dup['duplicate']['stock'] if dup['duplicate']['stock'] else 0
+                        })
+                    
+                    df_dup = pd.DataFrame(dup_rows)
+                    st.dataframe(df_dup, use_container_width=True, hide_index=True)
+                    
+                    csv = df_dup.to_csv(index=False).encode('utf-8-sig')
+                    st.download_button("📥 CSV", csv, f"duplicate_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+        
         return True
         
     except Exception as e:
-        st.error(f"❌ EROARE: {e}")
-        st.code(traceback.format_exc())
+        end_time = datetime.now()
+        duration = (end_time - start_time).seconds
+        
+        with log_container:
+            log_text.text(f"{log_text._value}\n❌ EROARE după {duration}s: {str(e)}")
+            log_text.text(f"{log_text._value}\n📍 Completate: {', '.join(checkpoint_data['steps_completed'])}")
+        
+        progress_container.empty()
+        
+        with result_container:
+            st.subheader("❌ Sincronizare Eșuată")
+            st.error(f"💥 Eroare după {duration//60}m {duration%60}s: {e}")
+            st.info(f"📍 Pași: {', '.join(checkpoint_data['steps_completed']) if checkpoint_data['steps_completed'] else 'Niciun pas'}")
+            
+            with st.expander("📋 Detalii"):
+                st.code(traceback.format_exc())
+        
         return False
 
+
+# ===== FUNCȚII RAPORT =====
+
 def get_woocommerce_stock_from_supabase(supabase_client):
-    """Citește TOATE stocurile"""
+    """Citește stocuri din Supabase"""
     try:
         all_data = []
         offset = 0
@@ -358,7 +538,7 @@ def get_woocommerce_stock_from_supabase(supabase_client):
         return {}
 
 def get_smartbill_stocks(email, token, cif, warehouse_name):
-    """SmartBill"""
+    """Preia stocuri SmartBill"""
     try:
         r = requests.get(
             "https://ws.smartbill.ro/SBORO/api/stocks",
@@ -390,24 +570,22 @@ def process_smartbill_data(data):
     return sb_dict
 
 def generate_discrepancy_report(sb_dict, woo_dict):
-    """Raport - FIX pentru tipuri de date compatibile cu Arrow"""
+    """Generează raport"""
     disc = []
     
-    # 1. În SB cu stoc dar lipsă total din Woo
     for code, sb in sb_dict.items():
         if code not in woo_dict and sb['stock'] > 0:
             disc.append({
                 'SKU': code,
                 'Denumire': sb['name'][:60],
                 'Stoc SB': float(sb['stock']),
-                'Stoc Woo': 0.0,  # NUMERIC, nu "N/A"
+                'Stoc Woo': 0.0,
                 'Dif': float(sb['stock']),
                 'Tip': 'Lipsă Woo',
                 'Status': 'CRITIC',
                 'P': 1
             })
     
-    # 2. În SB cu stoc dar 0 în Woo
     for code, sb in sb_dict.items():
         if code in woo_dict and sb['stock'] > 0 and woo_dict[code]['stock'] == 0:
             disc.append({
@@ -421,13 +599,12 @@ def generate_discrepancy_report(sb_dict, woo_dict):
                 'P': 2
             })
     
-    # 3. Diferențe cantitate
     for code in set(sb_dict.keys()) & set(woo_dict.keys()):
         sb_stock = sb_dict[code]['stock']
         woo_stock = woo_dict[code]['stock']
         diff = sb_stock - woo_stock
         
-        if abs(diff) > 0.01 and sb_stock > 0:  # Doar dacă SB > 0
+        if abs(diff) > 0.01 and sb_stock > 0:
             disc.append({
                 'SKU': code,
                 'Denumire': sb_dict[code]['name'][:60],
@@ -439,7 +616,6 @@ def generate_discrepancy_report(sb_dict, woo_dict):
                 'P': 3
             })
     
-    # 4. În Woo dar nu în SB (doar cu stoc > 0)
     for code, woo in woo_dict.items():
         if code not in sb_dict and woo['stock'] > 0:
             disc.append({
@@ -457,20 +633,18 @@ def generate_discrepancy_report(sb_dict, woo_dict):
     
     if len(df) > 0:
         df = df.sort_values(['P', 'Stoc SB'], ascending=[True, False]).drop('P', axis=1)
-        
-        # Asigură tipuri corecte
         df['Stoc SB'] = df['Stoc SB'].astype(float)
         df['Stoc Woo'] = df['Stoc Woo'].astype(float)
         df['Dif'] = df['Dif'].astype(float)
     
     return df
 
-# ====================== UI ======================
+
+# ===== UI PRINCIPAL =====
 
 st.title("📦 Stoc: SmartBill vs WooCommerce")
 st.markdown("---")
 
-# Stats
 if supabase:
     try:
         count_result = supabase.table('woocommerce_stock').select('*', count='exact').limit(1).execute()
@@ -483,7 +657,6 @@ if supabase:
             st.metric("📦 Produse DB", total)
         with col2:
             if result.data:
-                # Timestamp este UTC
                 last_sync = result.data[0]['last_synced_at']
                 st.info(f"📅 Ultima sync: {last_sync} (UTC)")
     except:
