@@ -188,6 +188,8 @@ def update_stocks_only(woo_url, woo_key, woo_secret, supabase_client):
 
 # ===== FUNCȚIE SYNC COMPLET =====
 
+# În funcția sync_woocommerce_full, înlocuiește secțiunea log_container cu:
+
 def sync_woocommerce_full(woo_url, woo_key, woo_secret, supabase_client):
     """Sincronizare completă cu resilience și logging"""
     
@@ -203,22 +205,26 @@ def sync_woocommerce_full(woo_url, woo_key, woo_secret, supabase_client):
         'steps_completed': []
     }
     
+    # ⬅️ Variabilă pentru log (NU mai folosesc log_text._value)
+    log_lines = [f"🕐 Start: {checkpoint_data['start']}"]
+    
     try:
         with progress_container:
             progress_bar = st.progress(0)
             status_text = st.empty()
             info_box = st.empty()
-            
+        
         with log_container:
-            log_text = st.empty()
-            log_text.text(f"🕐 Start: {checkpoint_data['start']}")
+            log_display = st.empty()
+            log_display.text('\n'.join(log_lines))
         
         # STEP 1: Preluare produse
         with progress_container:
             status_text.text("📥 Preluare produse principale...")
         
+        log_lines.append("📥 STEP 1: Preluare produse...")
         with log_container:
-            log_text.text(f"🕐 Start: {checkpoint_data['start']}\n📥 STEP 1: Preluare produse...")
+            log_display.text('\n'.join(log_lines))
         
         all_items = []
         page = 1
@@ -235,8 +241,9 @@ def sync_woocommerce_full(woo_url, woo_key, woo_secret, supabase_client):
                 )
                 
                 if response.status_code != 200:
+                    log_lines.append(f"⚠️ Pagina {page}: Status {response.status_code}")
                     with log_container:
-                        log_text.text(f"{log_text._value}\n⚠️ Pagina {page}: Status {response.status_code}")
+                        log_display.text('\n'.join(log_lines))
                     products_failed += 1
                     if products_failed > 3:
                         break
@@ -255,8 +262,9 @@ def sync_woocommerce_full(woo_url, woo_key, woo_secret, supabase_client):
                 time.sleep(0.1)
                 
             except Exception as e:
+                log_lines.append(f"❌ Eroare p{page}: {str(e)[:50]}")
                 with log_container:
-                    log_text.text(f"{log_text._value}\n❌ Eroare p{page}: {str(e)[:50]}")
+                    log_display.text('\n'.join(log_lines))
                 products_failed += 1
                 if products_failed > 3:
                     break
@@ -266,8 +274,7 @@ def sync_woocommerce_full(woo_url, woo_key, woo_secret, supabase_client):
         with progress_container:
             progress_bar.progress(0.2)
         
-        with log_container:
-            log_text.text(f"{log_text._value}\n✅ STEP 1: {len(products_data)} produse")
+        log_lines.append(f"✅ STEP 1: {len(products_data)} produse")
         
         simple = [p for p in products_data if p.get('type') in ['simple', 'external', 'grouped']]
         variable = [p for p in products_data if p.get('type') == 'variable']
@@ -277,16 +284,18 @@ def sync_woocommerce_full(woo_url, woo_key, woo_secret, supabase_client):
         
         all_items.extend(simple)
         
+        log_lines.append(f"📊 Simple: {len(simple)} | Variabile: {len(variable)}")
         with log_container:
-            log_text.text(f"{log_text._value}\n📊 Simple: {len(simple)} | Variabile: {len(variable)}")
+            log_display.text('\n'.join(log_lines))
         
         # STEP 2: Variații
         if variable:
             with progress_container:
                 status_text.text("🔄 Preluare variații...")
             
+            log_lines.append("🔄 STEP 2: Preluare variații...")
             with log_container:
-                log_text.text(f"{log_text._value}\n🔄 STEP 2: Preluare variații...")
+                log_display.text('\n'.join(log_lines))
             
             total_var = 0
             failed_products = []
@@ -320,8 +329,9 @@ def sync_woocommerce_full(woo_url, woo_key, woo_secret, supabase_client):
                         
                     except Exception as e:
                         failed_products.append(f"{product_id} ({str(e)[:30]})")
+                        log_lines.append(f"⚠️ Produs {product_id}: {str(e)[:50]}")
                         with log_container:
-                            log_text.text(f"{log_text._value}\n⚠️ Produs {product_id}: {str(e)[:50]}")
+                            log_display.text('\n'.join(log_lines))
                         break
                 
                 with progress_container:
@@ -330,23 +340,26 @@ def sync_woocommerce_full(woo_url, woo_key, woo_secret, supabase_client):
                 
                 if idx % checkpoint_every == 0:
                     elapsed = (datetime.now() - start_time).seconds
+                    log_lines.append(f"📍 Checkpoint {idx}/{len(variable)}: {total_var} variații ({elapsed}s)")
                     with log_container:
-                        log_text.text(f"{log_text._value}\n📍 Checkpoint {idx}/{len(variable)}: {total_var} variații ({elapsed}s)")
+                        log_display.text('\n'.join(log_lines))
             
             checkpoint_data['steps_completed'].append('variations')
             
+            log_lines.append(f"✅ STEP 2: {total_var} variații")
+            if failed_products:
+                log_lines.append(f"⚠️ {len(failed_products)} produse eșuate")
             with log_container:
-                log_text.text(f"{log_text._value}\n✅ STEP 2: {total_var} variații")
-                if failed_products:
-                    log_text.text(f"{log_text._value}\n⚠️ {len(failed_products)} produse eșuate")
+                log_display.text('\n'.join(log_lines))
         
         with progress_container:
             progress_bar.progress(0.7)
             info_box.success(f"✅ {len(all_items)} produse total")
         
         # STEP 3: Procesare
+        log_lines.append("💾 STEP 3: Procesare...")
         with log_container:
-            log_text.text(f"{log_text._value}\n💾 STEP 3: Procesare...")
+            log_display.text('\n'.join(log_lines))
         
         with progress_container:
             status_text.text("💾 Procesare...")
@@ -382,15 +395,17 @@ def sync_woocommerce_full(woo_url, woo_key, woo_secret, supabase_client):
         
         checkpoint_data['steps_completed'].append('processing')
         
+        log_lines.append(f"✅ STEP 3: {len(sku_map)} SKU-uri, {len(duplicate_details)} duplicate")
         with log_container:
-            log_text.text(f"{log_text._value}\n✅ STEP 3: {len(sku_map)} SKU-uri, {len(duplicate_details)} duplicate")
+            log_display.text('\n'.join(log_lines))
         
         with progress_container:
             progress_bar.progress(0.8)
         
         # STEP 4: Salvare
+        log_lines.append("💾 STEP 4: Salvare...")
         with log_container:
-            log_text.text(f"{log_text._value}\n💾 STEP 4: Salvare...")
+            log_display.text('\n'.join(log_lines))
         
         stock_data = []
         for sku, prod in sku_map.items():
@@ -420,8 +435,9 @@ def sync_woocommerce_full(woo_url, woo_key, woo_secret, supabase_client):
                     progress_bar.progress(0.8 + (0.2 * (saved / len(stock_data))))
                 
             except Exception as e:
+                log_lines.append(f"⚠️ Batch {i//500+1}: {str(e)[:50]}")
                 with log_container:
-                    log_text.text(f"{log_text._value}\n⚠️ Batch {i//500+1}: {str(e)[:50]}")
+                    log_display.text('\n'.join(log_lines))
                 
                 for item in batch:
                     try:
@@ -435,9 +451,10 @@ def sync_woocommerce_full(woo_url, woo_key, woo_secret, supabase_client):
         end_time = datetime.now()
         duration = (end_time - start_time).seconds
         
+        log_lines.append(f"✅ STEP 4: {saved} salvate ({failed_saves} eșuate)")
+        log_lines.append(f"🏁 Finalizat în {duration}s ({duration//60}m {duration%60}s)")
         with log_container:
-            log_text.text(f"{log_text._value}\n✅ STEP 4: {saved} salvate ({failed_saves} eșuate)")
-            log_text.text(f"{log_text._value}\n🏁 Finalizat în {duration}s ({duration//60}m {duration%60}s)")
+            log_display.text('\n'.join(log_lines))
         
         with progress_container:
             progress_bar.progress(1.0)
@@ -445,7 +462,7 @@ def sync_woocommerce_full(woo_url, woo_key, woo_secret, supabase_client):
         
         progress_container.empty()
         
-        # REZULTAT FINAL
+        # REZULTAT FINAL (același cod ca înainte)
         with result_container:
             st.subheader("✅ Sincronizare Completă!")
             st.success(f"🎉 {saved} stocuri în {duration//60}m {duration%60}s")
@@ -459,7 +476,6 @@ def sync_woocommerce_full(woo_url, woo_key, woo_secret, supabase_client):
             if failed_saves > 0:
                 st.warning(f"⚠️ {failed_saves} eșuate")
             
-            # Duplicate
             if duplicate_details:
                 st.markdown("---")
                 st.warning(f"⚠️ {len(duplicate_details)} SKU-uri duplicate")
@@ -494,9 +510,10 @@ def sync_woocommerce_full(woo_url, woo_key, woo_secret, supabase_client):
         end_time = datetime.now()
         duration = (end_time - start_time).seconds
         
+        log_lines.append(f"❌ EROARE după {duration}s: {str(e)}")
+        log_lines.append(f"📍 Completate: {', '.join(checkpoint_data['steps_completed'])}")
         with log_container:
-            log_text.text(f"{log_text._value}\n❌ EROARE după {duration}s: {str(e)}")
-            log_text.text(f"{log_text._value}\n📍 Completate: {', '.join(checkpoint_data['steps_completed'])}")
+            log_display.text('\n'.join(log_lines))
         
         progress_container.empty()
         
