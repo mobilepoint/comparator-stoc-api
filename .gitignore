@@ -3,6 +3,4 @@ __pycache__/
 *.py[cod]
 .Python
 venv/
-env/
-.venv/
 .DS_Store
