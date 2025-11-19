@@ -1,14 +1,12 @@
-# 📦 Verificare Stoc SmartBill vs WooCommerce
+# Comparator Stoc API
 
-Aplicație Streamlit pentru verificarea discrepanțelor de stoc între SmartBill (gestiune) și WooCommerce (magazin online).
+## Setup în Codespaces
 
-## Funcționalități
+1. Deschide Codespace
+2. Creează `.streamlit/secrets.toml` (vezi mai jos)
+3. Rulează: `streamlit run app.py`
 
-- ✅ Comparare automată stocuri SmartBill vs WooCommerce
-- 📊 Raport detaliat cu discrepanțe
-- 🔍 Filtrare și căutare avansată
-- 📥 Export CSV
-- 🔐 Gestionare securizată credențiale prin Streamlit Secrets
+## Configurare secrets.toml
 
-## Instalare Locală
+Creează fișierul `.streamlit/secrets.toml` (LOCAL - nu urca pe GitHub):
 
