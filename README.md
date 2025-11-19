@@ -1,12 +1,12 @@
 # Comparator Stoc API
 
-## Setup în Codespaces
+Aplicație Streamlit cu PostgreSQL direct (Supabase).
 
-1. Deschide Codespace
-2. Creează `.streamlit/secrets.toml` (vezi mai jos)
-3. Rulează: `streamlit run app.py`
+## Deploy pe Streamlit Cloud
 
-## Configurare secrets.toml
+1. Conectează repository-ul la Streamlit Cloud
+2. Adaugă secrets în Streamlit Cloud Dashboard
+3. Deploy automat
 
-Creează fișierul `.streamlit/secrets.toml` (LOCAL - nu urca pe GitHub):
+## Secrets (Streamlit Cloud → Settings → Secrets)
 
